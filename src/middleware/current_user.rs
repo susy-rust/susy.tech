@@ -1,0 +1,92 @@
+use super::prelude::*;
+
+use conduit_cookie::RequestSession;
+use diesel::prelude::*;
+
+use crate::db::RequestTransaction;
+use crate::util::errors::{std_error, AppResult, ChainError, Unauthorized};
+
+use crate::models::user::{UserNoEmailType, ALL_COLUMNS};
+use crate::models::User;
+use crate::schema::users;
+
+#[derive(Debug, Clone, Copy)]
+pub struct CurrentUser;
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum AuthenticationSource {
+    SessionCookie,
+    ApiToken { auth_header: String },
+}
+
+impl Middleware for CurrentUser {
+    fn before(&self, req: &mut dyn Request) -> Result<(), Box<dyn Error + Send>> {
+        // Check if the request has a session cookie with a `user_id` property inside
+        let id = {
+            req.session()
+                .get("user_id")
+                .and_then(|s| s.parse::<i32>().ok())
+        };
+
+        let conn = req.db_conn().map_err(std_error)?;
+
+        if let Some(id) = id {
+            // If it did, look for a user in the database with the given `user_id`
+            let maybe_user = users::table
+                .select(ALL_COLUMNS)
+                .find(id)
+                .first::<UserNoEmailType>(&*conn);
+            drop(conn);
+            if let Ok(user) = maybe_user {
+                let user = User::from(user);
+                // Attach the `User` model from the database to the request
+                req.mut_extensions().insert(user);
+                req.mut_extensions()
+                    .insert(AuthenticationSource::SessionCookie);
+            }
+        } else {
+            // Otherwise, look for an `Authorization` header on the request
+            // and try to find a user in the database with a matching API token
+            let user_auth = if let Some(headers) = req.headers().find("Authorization") {
+                let auth_header = headers[0].to_string();
+
+                User::find_by_api_token(&conn, &auth_header)
+                    .map(|user| (AuthenticationSource::ApiToken { auth_header }, user))
+                    .optional()
+                    .map_err(|e| Box::new(e) as Box<dyn Error + Send>)?
+            } else {
+                None
+            };
+
+            drop(conn);
+
+            if let Some((api_token, user)) = user_auth {
+                // Attach the `User` model from the database and the API token to the request
+                req.mut_extensions().insert(user);
+                req.mut_extensions().insert(api_token);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+pub trait RequestUser {
+    fn user(&self) -> AppResult<&User>;
+    fn authentication_source(&self) -> AppResult<AuthenticationSource>;
+}
+
+impl<'a> RequestUser for dyn Request + 'a {
+    fn user(&self) -> AppResult<&User> {
+        self.extensions()
+            .find::<User>()
+            .chain_error(|| Unauthorized)
+    }
+
+    fn authentication_source(&self) -> AppResult<AuthenticationSource> {
+        self.extensions()
+            .find::<AuthenticationSource>()
+            .cloned()
+            .chain_error(|| Unauthorized)
+    }
+}

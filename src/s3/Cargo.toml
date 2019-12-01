@@ -1,0 +1,19 @@
+[package]
+
+name = "cargo-registry-s3"
+version = "0.2.0"
+authors = ["Alex Crichton <alex@alexcrichton.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/susy-rust/susy.tech"
+description = "Interaction between susy.tech and S3 for storing crate files"
+
+[lib]
+
+name = "s3"
+path = "lib.rs"
+
+[dependencies]
+base64 = "0.6"
+chrono = "0.4"
+openssl = "0.10.13"
+reqwest = "0.9.1"
